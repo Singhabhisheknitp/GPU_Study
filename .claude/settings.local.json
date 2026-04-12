@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sL \"https://raw.githubusercontent.com/NVIDIA/cutlass/main/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp\" -o /data/frodo/abhishek/GPU_STUDY/sm90_gemm_tma_warpspecialized.hpp)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/NVIDIA/cutlass/main/include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized.hpp\" -o /data/frodo/abhishek/GPU_STUDY/sm90_mma_tma_gmma_ss_warpspecialized.hpp)",
+      "Bash(curl -s -L \"https://siboehm.com/articles/22/CUDA-MMM\")",
+      "Bash(curl -s -L \"https://raw.githubusercontent.com/siboehm/SGEMM_CUDA/master/src/kernels.cuh\")",
+      "Bash(curl:*)",
+      "Read(//bandwidth_calculation/**)",
+      "Read(//data/frodo/abhishek/bandwidth_calculation/chapters/**)",
+      "Bash(find / -maxdepth 4 -type d -name \"bandwidth_calculation\")",
+      "Bash(cp:*)",
+      "WebFetch(domain:docs.nvidia.com)",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\(item['path']\\) for item in data.get\\('items',[]\\)]\")",
+      "WebSearch",
+      "WebFetch(domain:nvidia.github.io)",
+      "WebFetch(domain:developer.nvidia.com)",
+      "WebFetch(domain:dlewis.io)",
+      "WebFetch(domain:www.truefoundry.com)",
+      "WebFetch(domain:mlcommons.org)",
+      "WebFetch(domain:www.jan.ai)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.databricks.com)",
+      "WebFetch(domain:developer-blogs.nvidia.com)",
+      "WebFetch(domain:techcommunity.microsoft.com)",
+      "WebFetch(domain:cursor.com)",
+      "WebFetch(domain:www.anyscale.com)",
+      "Read(//usr/local/cuda-11.4/bin/**)",
+      "Bash(/usr/local/cuda-11.4/bin/nvprof --version)",
+      "Bash(/usr/local/cuda-11.4/bin/nvprof python3:*)",
+      "Bash(/usr/local/cuda-11.4/bin/nvprof:*)"
+    ]
+  }
+}
