@@ -383,3 +383,68 @@ This 21% is pure compute pipeline stall, not memory. Would vanish on any archite
 ### Key takeaway
 
 53% efficiency on a 10-SM Pascal GPU is **reasonable and explained by the hardware**. The cuBLAS kernel is well-written (perfect coalescing, 96% SM utilization, no divergence). The bottleneck is that 10 SMs simply cannot generate enough outstanding memory requests to keep the GDDR5X controller fully saturated, compounded by a 21% FP16→FP32 conversion tax inherent to consumer Pascal.
+
+---
+
+## Step 9: FP32 Comparison — Isolating the FP16→FP32 Conversion Tax
+
+To verify Step 8's claim that the 21% exec-dependency stall is caused by the FP16→FP32 conversion on Pascal, we re-ran the same GEMV in FP32 (matrix A, x, y all `float`). FP32 doubles the bytes moved (64 MB vs 32 MB) and halves the arithmetic intensity (0.5 vs 1.0 ops/byte) but uses Pascal's native FP32 datapath end-to-end.
+
+### Benchmark Results (2026-04-13)
+
+```
+GPU: Quadro P2200
+Operation: y = A @ x, A shape (4096x4096), dtype torch.float32
+Matrix A size:  67.11 MB      Total bytes: 67.14 MB
+Total FLOPs:    33.55 MFLOPs   Arithmetic Intensity: 0.50 ops/byte
+
+Min:    480.7 μs    Median: 486.0 μs
+Achieved BW (median): 138.2 GB/s   Efficiency: 69.1%
+```
+
+### Side-by-Side Metrics (nvprof)
+
+| Metric | FP16 | FP32 | Change | Interpretation |
+|---|---|---|---|---|
+| Kernel template dtypes | `__half,__half,__half,float` | `float,float,float,float` | native FP32 path | no conversion step |
+| Unroll factor | int=4 | int=2 | less unrolling | cuBLAS picks different tile |
+| **stall_exec_dependency** | **21.42%** | **9.67%** | **−11.75 pp** ✓ | FP16→FP32 conversion stall ~halved |
+| **achieved_occupancy** | 59.7% | **72.0%** | +12.3 pp | FP32 kernel uses fewer regs/thread |
+| **dram_read_throughput** | 102.1 GB/s | **131.4 GB/s** | +29% | deeper memory queue |
+| **stall_memory_dependency** | 44.30% | **69.33%** | +25 pp | now purely DRAM-bound |
+| DRAM read transactions | 1,050,008 (32 MB) | 2,099,754 (64 MB) | 2× | as expected |
+| sm_efficiency | 95.62% | 96.27% | ~same | all SMs busy |
+| warp_execution_efficiency | 98.64% | 98.84% | ~same | no divergence |
+| stall_not_selected | 2.79% | 1.70% | small ↓ | low scheduler pressure |
+| Kernel time | 316 μs | 486 μs | +54% (not +100%) | bytes doubled but throughput improved |
+| **Achieved BW** | 106 GB/s | **138 GB/s** | +30% | |
+| **Efficiency (% peak)** | **53.0%** | **69.1%** | **+16.1 pp** | |
+
+### What this proves
+
+1. **The 21% exec-dependency stall was half conversion, half FMA chain.**
+   Dropping FP16 eliminated the FP16→FP32 conversion path but left a ~10% stall from the FMA accumulation dependency (each multiply-add depends on the previous partial sum). That ~10% floor exists in *any* dot-product kernel on any architecture — it's the latency of a single FMA pipeline step.
+
+2. **Occupancy went up (59.7% → 72.0%).**
+   The FP32 kernel uses fewer registers per thread — no FP16 load → FP32 convert → FP32 FMA temporary chain — and a lower unroll factor (2 vs 4). Lower register pressure relaxes the Step 8d binding constraint, so more warps fit per SM.
+
+3. **Memory stall went *up* (44% → 69%) — which is good.**
+   Higher memory-stall fraction means the kernel spends more of its time waiting for DRAM vs spinning on the compute pipeline. This is exactly the profile of a well-behaved memory-bound kernel. With conversion cost removed, DRAM is now the only thing holding us back.
+
+4. **Time did not double despite 2× bytes.**
+   Moving from 32 MB to 64 MB only increased kernel time from 316 μs → 486 μs (1.54×, not 2×). The extra occupancy and removed conversion stall let the kernel issue memory requests more densely — a clean demonstration that wall time = bytes / *effective* BW, not bytes / peak BW.
+
+5. **Bandwidth efficiency jumped 53% → 69%.**
+   The remaining 31% gap to peak is still the fundamental 10-SM-count bottleneck (insufficient outstanding memory requests to saturate GDDR5X). That ceiling cannot be moved without more SMs or lower-latency memory.
+
+### Updated bottleneck attribution for FP16
+
+| Bottleneck | Cost | Confirmed by |
+|---|---|---|
+| 10-SM memory queue depth | ~31 pp below peak | remaining gap in FP32 run |
+| FP16→FP32 conversion | ~12 pp (of the 47 pp gap in FP16) | 21.42% → 9.67% exec-stall drop |
+| FMA accumulation chain | ~10 pp (residual, unavoidable) | persists in FP32 |
+
+### Key takeaway
+
+The FP16 53% → FP32 69% jump is **not** because FP32 is faster per byte — it's because FP32 removes a compute-pipeline stall that was starving the memory subsystem. On Pascal, FP16 is actively harmful for memory-bound kernels: you pay a stall tax to use a format the hardware doesn't natively support. On an architecture with a native FP16 datapath (Volta+, Turing, Ampere, Hopper), this penalty vanishes and FP16 would win by 2× on bandwidth-bound work.

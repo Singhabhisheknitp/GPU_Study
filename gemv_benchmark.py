@@ -4,11 +4,13 @@ Measures achieved HBM bandwidth for y = A @ x
 where A is (4096 x 4096) FP16, x is (4096 x 1) FP16
 """
 
+import sys
 import torch
 
 # ─── Config ───
 M, K = 4096, 4096
-DTYPE = torch.float16
+DTYPE = torch.float32 if (len(sys.argv) > 1 and sys.argv[1] == "fp32") else torch.float16
+BYTES_PER_ELEM = 4 if DTYPE == torch.float32 else 2
 WARMUP = 50
 RUNS = 200
 
@@ -22,12 +24,12 @@ A = torch.randn(M, K, dtype=DTYPE, device=device)
 x = torch.randn(K, 1, dtype=DTYPE, device=device)
 
 # ─── Total bytes moved ───
-bytes_read = M * K * 2 + K * 2      # matrix A + vector x (FP16 = 2 bytes each)
-bytes_written = M * 2                 # vector y
+bytes_read = M * K * BYTES_PER_ELEM + K * BYTES_PER_ELEM   # matrix A + vector x
+bytes_written = M * BYTES_PER_ELEM                          # vector y
 total_bytes = bytes_read + bytes_written
 total_flops = 2 * M * K              # multiply + accumulate per element
 
-print(f"Matrix A size:  {M * K * 2 / 1e6:.2f} MB")
+print(f"Matrix A size:  {M * K * BYTES_PER_ELEM / 1e6:.2f} MB")
 print(f"Total bytes:    {total_bytes / 1e6:.2f} MB")
 print(f"Total FLOPs:    {total_flops / 1e6:.2f} MFLOPs")
 print(f"Arithmetic Intensity: {total_flops / total_bytes:.2f} ops/byte\n")
