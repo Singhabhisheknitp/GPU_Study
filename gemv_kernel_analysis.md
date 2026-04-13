@@ -402,12 +402,79 @@ Min:    480.7 μs    Median: 486.0 μs
 Achieved BW (median): 138.2 GB/s   Efficiency: 69.1%
 ```
 
+### 9a. FP32 Kernel Template Signature
+
+From `nvprof --print-gpu-trace` (FP32 run):
+
+```
+Grid: (512, 1, 1)   Block: (128, 1, 1)   Regs: 36   Shared: 1.5KB   Duration: ~475 μs
+Kernel: void gemv2T_kernel_val<int, int, float, float, float, float,
+        int=128, int=16, int=2, int=2, bool=0, bool=0,
+        cublasGemvParams<cublasGemvTensorStridedBatched<float const>,
+                         cublasGemvTensorStridedBatched<float const>,
+                         cublasGemvTensorStridedBatched<float>, float>>
+```
+
+Side-by-side with the FP16 template:
+
+| Template Parameter | FP16 | FP32 | Changed? |
+|---|---|---|---|
+| T_input_A | `__half` | `float` | ✓ dtype |
+| T_input_x | `__half` | `float` | ✓ dtype |
+| T_output | `__half` | `float` | ✓ dtype |
+| T_compute (accumulator) | `float` | `float` | same — FP32 accumulator in both |
+| THREADS_PER_BLOCK | 128 | 128 | same |
+| TILE_SIZE | 16 | 16 | same |
+| UNROLL_FACTOR | 2 | 2 | same |
+| ELEMENTS_PER_THREAD_PER_LOAD | **4** | **2** | ✓ halved |
+| USE_BETA_ZERO | 0 | 0 | same |
+| CONJUGATE | 0 | 0 | same |
+
+**Why ELEMENTS_PER_LOAD halved:** the kernel keeps an **8-byte** per-thread load width. In FP16 that is 4 halfs; in FP32 that is 2 floats. The memory transaction size is invariant, only the element count reflowing through registers changes.
+
+**Per-launch duration** from the trace: 470–483 μs across 10 launches, consistent with the 486 μs median from `gemv_benchmark.py`. nvprof independently corroborates the wall time.
+
+### 9b. FP32 Occupancy Calculation
+
+Kernel uses: **128 threads/block, 36 registers/thread, 1.5 KB shared memory**
+
+Applying each SM resource limit:
+
+| Limiter | Calculation | Max blocks/SM |
+|---|---|---|
+| Thread limit | 2048 / 128 | 16 blocks |
+| Warp limit | 64 warps / 4 warps per block | 16 blocks |
+| **Register limit** | **65536 / (128 × 36) = 65536/4608** | **14 blocks ← binding** |
+| Shared mem limit | 96 KB / 1.5 KB | 64 blocks |
+| Hard block limit | — | 32 blocks |
+
+**Registers are still the binding constraint, but less tightly.** 14 blocks × 128 threads = 1792 threads/SM = **56 warps/SM active** out of max 64 → theoretical **87.5% occupancy** (vs 68.75% for FP16).
+
+**Register allocation granularity refinement:** Pascal allocates registers per warp in chunks of **256**. So:
+- FP16: 44 regs × 32 threads = 1408 regs/warp → rounds up to 1536 → effective 48 regs/thread → 65536/(128×48) ≈ **10 blocks** → 40 warps/SM → **62.5% effective** (measured 59.7% ✓)
+- FP32: 36 regs × 32 threads = 1152 regs/warp → rounds up to 1280 → effective 40 regs/thread → 65536/(128×40) = **12.8 → 12 blocks** → 48 warps/SM → **75% effective** (measured 72.0% ✓)
+
+Measured occupancy matches the granularity-adjusted theoretical value in both cases within ~3 pp — the small residual comes from cuBLAS launch overhead and scheduler ramp-up/down across waves.
+
+### 9c. FP16 vs FP32 Occupancy Summary
+
+| | FP16 | FP32 |
+|---|---|---|
+| Regs/thread (nominal) | 44 | 36 |
+| Regs/thread (granularity-adjusted) | 48 | 40 |
+| Register-limited blocks/SM | 10 | 12 |
+| Theoretical occupancy (nominal) | 68.75% | 87.5% |
+| Effective occupancy (after granularity) | 62.5% | 75.0% |
+| **Measured occupancy** | **59.7%** | **72.0%** |
+
+**Why FP32 needs fewer registers:** the FP16 kernel needs temporaries for the load-convert-accumulate chain (`half` → `float` via a conversion instruction, then FMA, then store `float` temp back to a register), and it also unrolls more elements per thread (ELEMENTS_PER_LOAD=4 vs 2). Both effects inflate register pressure in FP16. Drop the conversion and halve the element count → 8 fewer regs/thread → looser register pressure → one more block per SM → measurable occupancy bump.
+
 ### Side-by-Side Metrics (nvprof)
 
 | Metric | FP16 | FP32 | Change | Interpretation |
 |---|---|---|---|---|
 | Kernel template dtypes | `__half,__half,__half,float` | `float,float,float,float` | native FP32 path | no conversion step |
-| Unroll factor | int=4 | int=2 | less unrolling | cuBLAS picks different tile |
+| ELEMENTS_PER_THREAD_PER_LOAD | 4 | 2 | halved | keeps 8-byte load width |
 | **stall_exec_dependency** | **21.42%** | **9.67%** | **−11.75 pp** ✓ | FP16→FP32 conversion stall ~halved |
 | **achieved_occupancy** | 59.7% | **72.0%** | +12.3 pp | FP32 kernel uses fewer regs/thread |
 | **dram_read_throughput** | 102.1 GB/s | **131.4 GB/s** | +29% | deeper memory queue |
